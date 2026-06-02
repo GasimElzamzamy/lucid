@@ -48,16 +48,22 @@ def train_model(model, train_loader, config):
             optimizer.step()
     return model
 
-def evaluate_model(model, test_loader):
-    """Evaluates the model and returns F1, Precision, and Recall."""
+def evaluate_model(model, test_loader, apply_noise=False, config=None):
+    """Evaluates the model. Optionally applies Gaussian noise to inputs."""
     model.eval()
     all_preds = []
     all_targets = []
     
     with torch.no_grad():
         for X_batch, y_batch in test_loader:
+            # Inject noise if flag is true
+            if apply_noise and config:
+                # Convert to numpy, add noise, convert back to tensor
+                X_np = X_batch.numpy()
+                X_noisy = apply_gaussian_noise(X_np, config)
+                X_batch = torch.tensor(X_noisy, dtype=torch.float32)
+
             predictions = model(X_batch)
-            # Threshold probabilities at 0.5 to get binary labels
             binary_preds = (predictions > 0.5).float()
             all_preds.extend(binary_preds.numpy())
             all_targets.extend(y_batch.numpy())
@@ -109,18 +115,36 @@ def main():
         for model_name, model in models.items():
             print(f"  -> Training {model_name}...")
             trained_model = train_model(model, train_loader, config)
-            metrics = evaluate_model(trained_model, test_loader)
-            results_log["BATADAL"][seed][model_name] = metrics
-            print(f"     {model_name} F1-Score: {metrics['f1']:.4f}")
+            
+            # 1. Evaluate on Clean Data
+            metrics_clean = evaluate_model(trained_model, test_loader)
+            
+            # 2. Evaluate on Noisy Data
+            metrics_noisy = evaluate_model(trained_model, test_loader, apply_noise=True, config=config)
+            
+            # Log both
+            results_log["BATADAL"][seed][model_name] = {
+                "clean": metrics_clean,
+                "noisy": metrics_noisy
+            }
+            print(f"     {model_name} Clean F1: {metrics_clean['f1']:.4f} | Noisy F1: {metrics_noisy['f1']:.4f}")
 
-        # --- SKAB EXPERIMENT ---
+# --- SKAB EXPERIMENT ---
         print("Training on SKAB (GroupKFold)...")
         skab_df = load_skab(config)
         skab_splits = prepare_skab_cv(skab_df, config)
         
-        # Dictionary to hold the scores across the 5 folds
-        fold_metrics = {"LSTM": {"f1": [], "precision": [], "recall": []},
-                        "1D-CNN": {"f1": [], "precision": [], "recall": []}}
+        # Nested dictionary to hold clean/noisy scores across the 5 folds
+        fold_metrics = {
+            "LSTM": {
+                "clean": {"f1": [], "precision": [], "recall": []},
+                "noisy": {"f1": [], "precision": [], "recall": []}
+            },
+            "1D-CNN": {
+                "clean": {"f1": [], "precision": [], "recall": []},
+                "noisy": {"f1": [], "precision": [], "recall": []}
+            }
+        }
                         
         for fold_idx, fold_data in enumerate(skab_splits):
             print(f"  -> SKAB Fold {fold_idx + 1}/{len(skab_splits)}")
@@ -130,9 +154,8 @@ def main():
             train_loader_skab = DataLoader(train_dataset_skab, batch_size=batch_size, shuffle=True)
             test_loader_skab = DataLoader(test_dataset_skab, batch_size=batch_size, shuffle=False)
             
-            input_size_skab = fold_data['X_train'].shape[1] # SKAB has 8 features
+            input_size_skab = fold_data['X_train'].shape[1] 
             
-            # Re-initialize models specifically for SKAB's input size
             models_skab = {
                 "LSTM": LSTMAnomalyDetector(input_size_skab, config['deep_learning']['hidden_units'], config['deep_learning']['dropout_rate']),
                 "1D-CNN": CNN1DAnomalyDetector(input_size_skab, config['deep_learning']['hidden_units'], config['deep_learning']['dropout_rate'])
@@ -140,19 +163,34 @@ def main():
             
             for model_name, model in models_skab.items():
                 trained_model = train_model(model, train_loader_skab, config)
-                metrics = evaluate_model(trained_model, test_loader_skab)
-                fold_metrics[model_name]["f1"].append(metrics["f1"])
-                fold_metrics[model_name]["precision"].append(metrics["precision"])
-                fold_metrics[model_name]["recall"].append(metrics["recall"])
                 
-        # Average the metrics across all folds for this specific seed
+                # 1. Evaluate Clean
+                metrics_clean = evaluate_model(trained_model, test_loader_skab)
+                fold_metrics[model_name]["clean"]["f1"].append(metrics_clean["f1"])
+                fold_metrics[model_name]["clean"]["precision"].append(metrics_clean["precision"])
+                fold_metrics[model_name]["clean"]["recall"].append(metrics_clean["recall"])
+                
+                # 2. Evaluate Noisy
+                metrics_noisy = evaluate_model(trained_model, test_loader_skab, apply_noise=True, config=config)
+                fold_metrics[model_name]["noisy"]["f1"].append(metrics_noisy["f1"])
+                fold_metrics[model_name]["noisy"]["precision"].append(metrics_noisy["precision"])
+                fold_metrics[model_name]["noisy"]["recall"].append(metrics_noisy["recall"])
+                
+        # Average the metrics across all 5 folds
         results_log["SKAB"][seed] = {}
         for model_name in fold_metrics:
-            avg_f1 = np.mean(fold_metrics[model_name]["f1"])
-            avg_prec = np.mean(fold_metrics[model_name]["precision"])
-            avg_rec = np.mean(fold_metrics[model_name]["recall"])
-            results_log["SKAB"][seed][model_name] = {"f1": avg_f1, "precision": avg_prec, "recall": avg_rec}
-            print(f"     SKAB {model_name} Avg F1-Score: {avg_f1:.4f}")
+            results_log["SKAB"][seed][model_name] = {"clean": {}, "noisy": {}}
+            
+            for condition in ["clean", "noisy"]:
+                avg_f1 = np.mean(fold_metrics[model_name][condition]["f1"])
+                avg_prec = np.mean(fold_metrics[model_name][condition]["precision"])
+                avg_rec = np.mean(fold_metrics[model_name][condition]["recall"])
+                
+                results_log["SKAB"][seed][model_name][condition] = {
+                    "f1": avg_f1, "precision": avg_prec, "recall": avg_rec
+                }
+            
+            print(f"     SKAB {model_name} Clean F1: {results_log['SKAB'][seed][model_name]['clean']['f1']:.4f} | Noisy F1: {results_log['SKAB'][seed][model_name]['noisy']['f1']:.4f}")
 
     # Save final results to JSON
     results_path = os.path.join(config['output_dir'], "dl_results.json")
