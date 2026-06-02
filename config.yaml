@@ -1,0 +1,49 @@
+# ==========================================
+# LUCID: MASTER CONFIGURATION FILE
+# ==========================================
+
+# 1. Global Experiment Settings
+# The rubric explicitly requires these 5 seeds for statistical stability
+random_seeds: [42, 123, 2026, 7, 999]
+output_dir: "./results"
+
+# 2. Dataset Paths & Splitting Rules
+data:
+  skab:
+    dir_path: "./data/SKAB"
+    valve1_file: "valve1.csv"
+    valve2_file: "valve2.csv"
+    # SKAB requires GroupKFold based on the file source, not a simple split
+    n_splits_cv: 5
+
+  batadal:
+    dir_path: "./data/BATADAL"
+    train_file: "BATADAL_dataset03.csv"
+    test_file: "BATADAL_test_dataset.csv"
+    # BATADAL requires strict chronological splitting: 60% Train, 20% Val, 20% Test
+    split_ratios: [0.6, 0.2, 0.2]
+
+# 3. Probabilistic Automata Hyperparameters (Grid Search)
+# The rubric requires analyzing the effect of these specific sizes (5 Points)
+automata:
+  window_sizes: [3, 4, 5, 6]
+  alphabet_sizes: [3, 4, 5, 6]
+  # For transition probabilities that are zero (smoothing)
+  laplace_smoothing: 1e-5
+
+# 4. Deep Learning Hyperparameters
+deep_learning:
+  models_to_train: ["LSTM", "1D-CNN"] # Options: LSTM, GRU, 1D-CNN
+  epochs: 50
+  batch_size: 32
+  learning_rate: 0.001
+  early_stopping_patience: 5
+  hidden_units: 64
+  dropout_rate: 0.2
+
+# 5. Robustness Scenarios (Noise & Unseen)
+scenarios:
+  gaussian_noise:
+    apply: true
+    mean: 0.0
+    std_dev: 0.1 # This will be injected into the test sets
