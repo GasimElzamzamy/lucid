@@ -113,6 +113,47 @@ def main():
             results_log["BATADAL"][seed][model_name] = metrics
             print(f"     {model_name} F1-Score: {metrics['f1']:.4f}")
 
+        # --- SKAB EXPERIMENT ---
+        print("Training on SKAB (GroupKFold)...")
+        skab_df = load_skab(config)
+        skab_splits = prepare_skab_cv(skab_df, config)
+        
+        # Dictionary to hold the scores across the 5 folds
+        fold_metrics = {"LSTM": {"f1": [], "precision": [], "recall": []},
+                        "1D-CNN": {"f1": [], "precision": [], "recall": []}}
+                        
+        for fold_idx, fold_data in enumerate(skab_splits):
+            print(f"  -> SKAB Fold {fold_idx + 1}/{len(skab_splits)}")
+            train_dataset_skab = TimeSeriesDataset(fold_data['X_train'], fold_data['y_train'], window_size)
+            test_dataset_skab = TimeSeriesDataset(fold_data['X_test'], fold_data['y_test'], window_size)
+            
+            train_loader_skab = DataLoader(train_dataset_skab, batch_size=batch_size, shuffle=True)
+            test_loader_skab = DataLoader(test_dataset_skab, batch_size=batch_size, shuffle=False)
+            
+            input_size_skab = fold_data['X_train'].shape[1] # SKAB has 8 features
+            
+            # Re-initialize models specifically for SKAB's input size
+            models_skab = {
+                "LSTM": LSTMAnomalyDetector(input_size_skab, config['deep_learning']['hidden_units'], config['deep_learning']['dropout_rate']),
+                "1D-CNN": CNN1DAnomalyDetector(input_size_skab, config['deep_learning']['hidden_units'], config['deep_learning']['dropout_rate'])
+            }
+            
+            for model_name, model in models_skab.items():
+                trained_model = train_model(model, train_loader_skab, config)
+                metrics = evaluate_model(trained_model, test_loader_skab)
+                fold_metrics[model_name]["f1"].append(metrics["f1"])
+                fold_metrics[model_name]["precision"].append(metrics["precision"])
+                fold_metrics[model_name]["recall"].append(metrics["recall"])
+                
+        # Average the metrics across all folds for this specific seed
+        results_log["SKAB"][seed] = {}
+        for model_name in fold_metrics:
+            avg_f1 = np.mean(fold_metrics[model_name]["f1"])
+            avg_prec = np.mean(fold_metrics[model_name]["precision"])
+            avg_rec = np.mean(fold_metrics[model_name]["recall"])
+            results_log["SKAB"][seed][model_name] = {"f1": avg_f1, "precision": avg_prec, "recall": avg_rec}
+            print(f"     SKAB {model_name} Avg F1-Score: {avg_f1:.4f}")
+
     # Save final results to JSON
     results_path = os.path.join(config['output_dir'], "dl_results.json")
     with open(results_path, 'w') as f:
