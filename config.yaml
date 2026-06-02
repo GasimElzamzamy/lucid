@@ -11,16 +11,12 @@ output_dir: "./results"
 data:
   skab:
     dir_path: "./data/SKAB"
-    valve1_file: "valve1.csv"
-    valve2_file: "valve2.csv"
-    # SKAB requires GroupKFold based on the file source, not a simple split
+    target_folders: ["valve1", "valve2", "other"] # Pipeline will loop through these
     n_splits_cv: 5
 
   batadal:
     dir_path: "./data/BATADAL"
-    train_file: "BATADAL_dataset03.csv"
-    test_file: "BATADAL_test_dataset.csv"
-    # BATADAL requires strict chronological splitting: 60% Train, 20% Val, 20% Test
+    main_file: "BATADAL_dataset04.csv" # Updated to match your download
     split_ratios: [0.6, 0.2, 0.2]
 
 # 3. Probabilistic Automata Hyperparameters (Grid Search)
