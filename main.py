@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 # Import our custom modules
 from src.data_pipeline import load_config, load_skab, prepare_skab_cv, load_and_prepare_batadal
 from src.models_dl import TimeSeriesDataset, LSTMAnomalyDetector, CNN1DAnomalyDetector
+from src.visualizations import plot_confusion_matrix, plot_roc_curve, plot_pr_curve
 
 # ==========================================
 # 1. UTILITIES & REPRODUCIBILITY
@@ -48,11 +49,12 @@ def train_model(model, train_loader, config):
             optimizer.step()
     return model
 
-def evaluate_model(model, test_loader, apply_noise=False, config=None):
+def evaluate_model(model, test_loader, apply_noise=False, config=None, return_arrays=False):
     """Evaluates the model. Optionally applies Gaussian noise to inputs."""
     model.eval()
     all_preds = []
     all_targets = []
+    all_probs = []
     
     with torch.no_grad():
         for X_batch, y_batch in test_loader:
@@ -65,6 +67,8 @@ def evaluate_model(model, test_loader, apply_noise=False, config=None):
 
             predictions = model(X_batch)
             binary_preds = (predictions > 0.5).float()
+
+            all_probs.extend(predictions.numpy())
             all_preds.extend(binary_preds.numpy())
             all_targets.extend(y_batch.numpy())
             
@@ -72,7 +76,15 @@ def evaluate_model(model, test_loader, apply_noise=False, config=None):
     precision = precision_score(all_targets, all_preds, zero_division=0)
     recall = recall_score(all_targets, all_preds, zero_division=0)
     
-    return {"f1": f1, "precision": precision, "recall": recall}
+    result = {"f1": f1, "precision": precision, "recall": recall}
+    
+    if return_arrays:
+        result["targets"] = all_targets
+        result["preds"] = all_preds
+        result["probs"] = all_probs
+
+
+    return result
 
 # ==========================================
 # 3. MASTER ORCHESTRATION LOOP
@@ -116,16 +128,27 @@ def main():
             print(f"  -> Training {model_name}...")
             trained_model = train_model(model, train_loader, config)
             
-            # 1. Evaluate on Clean Data
-            metrics_clean = evaluate_model(trained_model, test_loader)
+            # 1. Evaluate on Clean Data (Trigger plots ONLY for seed 42)
+            needs_plots = (seed == 42)
+            metrics_clean = evaluate_model(trained_model, test_loader, return_arrays=needs_plots)
+            
+            # Generate the Visualizations
+            if needs_plots:
+                print(f"     -> Generating plots for BATADAL {model_name}...")
+                plot_confusion_matrix(metrics_clean["targets"], metrics_clean["preds"], 
+                                      f"BATADAL {model_name} Confusion Matrix", 
+                                      os.path.join(config['output_dir'], f"BATADAL_{model_name}_CM.png"))
+                plot_roc_curve(metrics_clean["targets"], metrics_clean["probs"], 
+                               f"BATADAL {model_name} ROC Curve", 
+                               os.path.join(config['output_dir'], f"BATADAL_{model_name}_ROC.png"))
             
             # 2. Evaluate on Noisy Data
             metrics_noisy = evaluate_model(trained_model, test_loader, apply_noise=True, config=config)
             
             # Log both
             results_log["BATADAL"][seed][model_name] = {
-                "clean": metrics_clean,
-                "noisy": metrics_noisy
+                "clean": {"f1": metrics_clean["f1"], "precision": metrics_clean["precision"], "recall": metrics_clean["recall"]},
+                "noisy": {"f1": metrics_noisy["f1"], "precision": metrics_noisy["precision"], "recall": metrics_noisy["recall"]}
             }
             print(f"     {model_name} Clean F1: {metrics_clean['f1']:.4f} | Noisy F1: {metrics_noisy['f1']:.4f}")
 
@@ -164,8 +187,19 @@ def main():
             for model_name, model in models_skab.items():
                 trained_model = train_model(model, train_loader_skab, config)
                 
-                # 1. Evaluate Clean
-                metrics_clean = evaluate_model(trained_model, test_loader_skab)
+                # 1. Evaluate Clean (Trigger plots ONLY for seed 42 AND the first fold)
+                needs_plots = (seed == 42 and fold_idx == 0)
+                metrics_clean = evaluate_model(trained_model, test_loader_skab, return_arrays=needs_plots)
+                
+                if needs_plots:
+                    print(f"     -> Generating plots for SKAB {model_name}...")
+                    plot_confusion_matrix(metrics_clean["targets"], metrics_clean["preds"], 
+                                          f"SKAB {model_name} Confusion Matrix", 
+                                          os.path.join(config['output_dir'], f"SKAB_{model_name}_CM.png"))
+                    plot_roc_curve(metrics_clean["targets"], metrics_clean["probs"], 
+                                   f"SKAB {model_name} ROC Curve", 
+                                   os.path.join(config['output_dir'], f"SKAB_{model_name}_ROC.png"))
+
                 fold_metrics[model_name]["clean"]["f1"].append(metrics_clean["f1"])
                 fold_metrics[model_name]["clean"]["precision"].append(metrics_clean["precision"])
                 fold_metrics[model_name]["clean"]["recall"].append(metrics_clean["recall"])
@@ -175,6 +209,7 @@ def main():
                 fold_metrics[model_name]["noisy"]["f1"].append(metrics_noisy["f1"])
                 fold_metrics[model_name]["noisy"]["precision"].append(metrics_noisy["precision"])
                 fold_metrics[model_name]["noisy"]["recall"].append(metrics_noisy["recall"])
+
                 
         # Average the metrics across all 5 folds
         results_log["SKAB"][seed] = {}
