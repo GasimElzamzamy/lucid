@@ -62,9 +62,12 @@ def prepare_skab_cv(df, config):
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
         
-        # 2. PCA (Optional step based on rubric, extracting PC1)
-        # Using 1 component as time-series models often expect 1D feature arrays per timestep,
-        # or we can keep all features. We'll leave it ready for multi-variate.
+        # 2. PCA Compression (If enabled in config)
+        if config['data'].get('apply_pca', False):
+            pca = PCA(n_components=config['data']['pca_components'])
+            # Fit PCA ONLY on training data
+            X_train_scaled = pca.fit_transform(X_train_scaled)
+            X_test_scaled = pca.transform(X_test_scaled)
         
         splits.append({
             'X_train': X_train_scaled, 'y_train': y_train,
@@ -102,6 +105,13 @@ def load_and_prepare_batadal(config):
     X_train_scaled = scaler.fit_transform(X_train)
     X_val_scaled = scaler.transform(X_val)
     X_test_scaled = scaler.transform(X_test)
+    
+    # PCA Compression (If enabled in config)
+    if config['data'].get('apply_pca', False):
+        pca = PCA(n_components=config['data']['pca_components'])
+        X_train_scaled = pca.fit_transform(X_train_scaled)
+        X_val_scaled = pca.transform(X_val_scaled)
+        X_test_scaled = pca.transform(X_test_scaled)
     
     return {
         'X_train': X_train_scaled, 'y_train': y_train,

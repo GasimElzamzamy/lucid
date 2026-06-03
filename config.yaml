@@ -9,6 +9,9 @@ output_dir: "./results"
 
 # 2. Dataset Paths & Splitting Rules
 data:
+  apply_pca: true # Toggle PCA for cross-dataset compatibility
+  pca_components: # Squash all features into 1 unified component
+
   skab:
     dir_path: "./data/SKAB"
     target_folders: ["valve1", "valve2", "other"] # Pipeline will loop through these
