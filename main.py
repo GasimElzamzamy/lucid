@@ -210,7 +210,7 @@ def main():
                 fold_metrics[model_name]["noisy"]["precision"].append(metrics_noisy["precision"])
                 fold_metrics[model_name]["noisy"]["recall"].append(metrics_noisy["recall"])
 
-                
+
         # Average the metrics across all 5 folds
         results_log["SKAB"][seed] = {}
         for model_name in fold_metrics:
@@ -226,6 +226,52 @@ def main():
                 }
             
             print(f"     SKAB {model_name} Clean F1: {results_log['SKAB'][seed][model_name]['clean']['f1']:.4f} | Noisy F1: {results_log['SKAB'][seed][model_name]['noisy']['f1']:.4f}")
+
+        # ==========================================
+        # --- CROSS-DATASET GENERALIZATION ---
+        # ==========================================
+        # This will only run if PCA is turned on and set to 1 component
+        if config['data'].get('apply_pca', False) and config['data'].get('pca_components', 1) == 1:
+            print("\n  -> Running Cross-Dataset Generalization (PCA=1)...")
+            
+            results_log.setdefault("CROSS_DATASET", {})
+            results_log["CROSS_DATASET"][seed] = {"Train_BATADAL_Test_SKAB": {}, "Train_SKAB_Test_BATADAL": {}}
+            
+            # 1. Train on BATADAL, Test on SKAB (Fold 0)
+            print("     [1/2] Training on BATADAL, Testing on SKAB...")
+            cross_models_bat = {
+                "LSTM": LSTMAnomalyDetector(1, config['deep_learning']['hidden_units'], config['deep_learning']['dropout_rate']),
+                "1D-CNN": CNN1DAnomalyDetector(1, config['deep_learning']['hidden_units'], config['deep_learning']['dropout_rate'])
+            }
+            
+            # Get SKAB Fold 0 Test Loader
+            test_dataset_skab_cross = TimeSeriesDataset(skab_splits[0]['X_test'], skab_splits[0]['y_test'], window_size)
+            test_loader_skab_cross = DataLoader(test_dataset_skab_cross, batch_size=batch_size, shuffle=False)
+            
+            for model_name, model in cross_models_bat.items():
+                trained_cross = train_model(model, train_loader, config) # train_loader is BATADAL
+                metrics = evaluate_model(trained_cross, test_loader_skab_cross)
+                results_log["CROSS_DATASET"][seed]["Train_BATADAL_Test_SKAB"][model_name] = metrics
+                print(f"       [{model_name}] BATADAL -> SKAB F1-Score: {metrics['f1']:.4f}")
+
+            # 2. Train on SKAB (Fold 0), Test on BATADAL
+            print("     [2/2] Training on SKAB, Testing on BATADAL...")
+            cross_models_skab = {
+                "LSTM": LSTMAnomalyDetector(1, config['deep_learning']['hidden_units'], config['deep_learning']['dropout_rate']),
+                "1D-CNN": CNN1DAnomalyDetector(1, config['deep_learning']['hidden_units'], config['deep_learning']['dropout_rate'])
+            }
+            
+            # Get SKAB Fold 0 Train Loader
+            train_dataset_skab_cross = TimeSeriesDataset(skab_splits[0]['X_train'], skab_splits[0]['y_train'], window_size)
+            train_loader_skab_cross = DataLoader(train_dataset_skab_cross, batch_size=batch_size, shuffle=True)
+            
+            for model_name, model in cross_models_skab.items():
+                trained_cross = train_model(model, train_loader_skab_cross, config)
+                metrics = evaluate_model(trained_cross, test_loader) # test_loader is BATADAL
+                results_log["CROSS_DATASET"][seed]["Train_SKAB_Test_BATADAL"][model_name] = metrics
+                print(f"       [{model_name}] SKAB -> BATADAL F1-Score: {metrics['f1']:.4f}")
+        else:
+            print("\n  -> Skipping Cross-Dataset Test (apply_pca is False or components != 1)")
 
     # Save final results to JSON
     results_path = os.path.join(config['output_dir'], "dl_results.json")
