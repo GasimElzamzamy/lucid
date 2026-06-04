@@ -87,6 +87,24 @@ def evaluate_model(model, test_loader, apply_noise=False, config=None, return_ar
     return result
 
 
+def align_labels_to_automata_predictions(y_test, num_predictions):
+    """
+    Automata predictions are produced on SAX/pattern level, not raw row level.
+    If any raw label inside a segment is anomalous, the segment label becomes anomaly.
+    """
+    y_test = np.asarray(y_test, dtype=int)
+
+    if num_predictions <= 0:
+        return np.array([], dtype=int)
+
+    segments = np.array_split(y_test, num_predictions)
+
+    return np.array(
+        [1 if np.any(segment == 1) else 0 for segment in segments],
+        dtype=int
+    )
+
+
 def evaluate_automata(
     X_train_pc1,
     X_test_pc1,
@@ -98,7 +116,7 @@ def evaluate_automata(
 ):
     """
     Trains and evaluates the Probabilistic Automata model on PC1 series.
-    Labels are aligned with sliding-window outputs by using y[window_size - 1:].
+    Labels are aligned from raw row-level labels to SAX/pattern-level labels.
     """
     if apply_noise:
         X_test_pc1 = apply_gaussian_noise(X_test_pc1, config)
@@ -116,7 +134,10 @@ def evaluate_automata(
         anomaly_threshold=config["automata"]["anomaly_threshold"]
     )
 
-    y_aligned = y_test[-len(preds):]
+    y_aligned = align_labels_to_automata_predictions(
+        y_test=y_test,
+        num_predictions=len(preds)
+    )
 
     min_len = min(len(y_aligned), len(preds))
     y_aligned = y_aligned[:min_len]
