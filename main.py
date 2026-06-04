@@ -1,3 +1,4 @@
+
 import json
 import os
 import torch
@@ -63,16 +64,22 @@ def evaluate_model(model, test_loader, apply_noise=False, config=None, return_ar
     with torch.no_grad():
         for X_batch, y_batch in test_loader:
             if apply_noise and config:
-                X_np = X_batch.numpy()
+                X_np = X_batch.detach().cpu().numpy()
                 X_noisy = apply_gaussian_noise(X_np, config)
                 X_batch = torch.tensor(X_noisy, dtype=torch.float32)
 
             predictions = model(X_batch)
             binary_preds = (predictions > 0.5).float()
 
-        all_probs.extend(np.atleast_1d(predictions.detach().cpu().numpy()).reshape(-1))
-        all_preds.extend(np.atleast_1d(binary_preds.detach().cpu().numpy()).reshape(-1))
-        all_targets.extend(np.atleast_1d(y_batch.detach().cpu().numpy()).reshape(-1))
+            all_probs.extend(
+                np.atleast_1d(predictions.detach().cpu().numpy()).reshape(-1)
+            )
+            all_preds.extend(
+                np.atleast_1d(binary_preds.detach().cpu().numpy()).reshape(-1)
+            )
+            all_targets.extend(
+                np.atleast_1d(y_batch.detach().cpu().numpy()).reshape(-1)
+            )
 
     result = {
         "f1": f1_score(all_targets, all_preds, zero_division=0),
