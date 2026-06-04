@@ -1,22 +1,26 @@
-
 import json
 import os
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import numpy as np
-from sklearn.metrics import f1_score, precision_score, recall_score, accuracy_score
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from torch.utils.data import DataLoader
 
-from src.data_pipeline import load_config, load_skab, prepare_skab_cv, load_and_prepare_batadal
-from src.models_dl import TimeSeriesDataset, LSTMAnomalyDetector, CNN1DAnomalyDetector
-from src.models_automata import ProbabilisticAutomata
+from src.data_pipeline import (
+    load_and_prepare_batadal,
+    load_config,
+    load_skab,
+    prepare_skab_cv,
+)
 from src.explainer import AutomataExplainer
-from src.visualizations import plot_confusion_matrix, plot_roc_curve, plot_pr_curve
+from src.models_automata import ProbabilisticAutomata
+from src.models_dl import CNN1DAnomalyDetector, LSTMAnomalyDetector, TimeSeriesDataset
+from src.visualizations import plot_confusion_matrix, plot_roc_curve
 
 
 def set_seed(seed):
-    """Locks all random number generators for strict reproducibility."""
     torch.manual_seed(seed)
     np.random.seed(seed)
     if torch.cuda.is_available():
@@ -24,7 +28,6 @@ def set_seed(seed):
 
 
 def apply_gaussian_noise(X, config):
-    """Injects noise to test model robustness if enabled in config."""
     noise_cfg = config["scenarios"]["gaussian_noise"]
     if noise_cfg["apply"]:
         noise = np.random.normal(noise_cfg["mean"], noise_cfg["std_dev"], X.shape)
@@ -33,16 +36,15 @@ def apply_gaussian_noise(X, config):
 
 
 def train_model(model, train_loader, config):
-    """Standard PyTorch training loop."""
     criterion = nn.BCELoss()
     optimizer = optim.Adam(
         model.parameters(),
-        lr=config["deep_learning"]["learning_rate"]
+        lr=config["deep_learning"]["learning_rate"],
     )
-    epochs = config["deep_learning"]["epochs"]
 
     model.train()
-    for epoch in range(epochs):
+
+    for _ in range(config["deep_learning"]["epochs"]):
         for X_batch, y_batch in train_loader:
             optimizer.zero_grad()
             predictions = model(X_batch)
@@ -54,7 +56,6 @@ def train_model(model, train_loader, config):
 
 
 def evaluate_model(model, test_loader, apply_noise=False, config=None, return_arrays=False):
-    """Evaluates a deep learning model."""
     model.eval()
 
     all_preds = []
@@ -71,20 +72,14 @@ def evaluate_model(model, test_loader, apply_noise=False, config=None, return_ar
             predictions = model(X_batch)
             binary_preds = (predictions > 0.5).float()
 
-            all_probs.extend(
-                np.atleast_1d(predictions.detach().cpu().numpy()).reshape(-1)
-            )
-            all_preds.extend(
-                np.atleast_1d(binary_preds.detach().cpu().numpy()).reshape(-1)
-            )
-            all_targets.extend(
-                np.atleast_1d(y_batch.detach().cpu().numpy()).reshape(-1)
-            )
+            all_probs.extend(np.atleast_1d(predictions.detach().cpu().numpy()).reshape(-1))
+            all_preds.extend(np.atleast_1d(binary_preds.detach().cpu().numpy()).reshape(-1))
+            all_targets.extend(np.atleast_1d(y_batch.detach().cpu().numpy()).reshape(-1))
 
     result = {
         "f1": f1_score(all_targets, all_preds, zero_division=0),
         "precision": precision_score(all_targets, all_preds, zero_division=0),
-        "recall": recall_score(all_targets, all_preds, zero_division=0)
+        "recall": recall_score(all_targets, all_preds, zero_division=0),
     }
 
     if return_arrays:
@@ -96,10 +91,6 @@ def evaluate_model(model, test_loader, apply_noise=False, config=None, return_ar
 
 
 def align_labels_to_automata_predictions(y_test, num_predictions):
-    """
-    Automata predictions are produced on SAX/pattern level, not raw row level.
-    If any raw label inside a segment is anomalous, the segment label becomes anomaly.
-    """
     y_test = np.asarray(y_test, dtype=int)
 
     if num_predictions <= 0:
@@ -109,7 +100,7 @@ def align_labels_to_automata_predictions(y_test, num_predictions):
 
     return np.array(
         [1 if np.any(segment == 1) else 0 for segment in segments],
-        dtype=int
+        dtype=int,
     )
 
 
@@ -120,19 +111,15 @@ def evaluate_automata(
     config,
     window_size,
     alphabet_size,
-    apply_noise=False
+    apply_noise=False,
 ):
-    """
-    Trains and evaluates the Probabilistic Automata model on PC1 series.
-    Labels are aligned from raw row-level labels to SAX/pattern-level labels.
-    """
     if apply_noise:
         X_test_pc1 = apply_gaussian_noise(X_test_pc1, config)
 
     automata = ProbabilisticAutomata(
         window_size=window_size,
         alphabet_size=alphabet_size,
-        laplace_smoothing=config["automata"]["laplace_smoothing"]
+        laplace_smoothing=config["automata"]["laplace_smoothing"],
     )
 
     automata.fit(X_train_pc1)
@@ -143,12 +130,12 @@ def evaluate_automata(
 
     preds = automata.predict(
         X_test_pc1,
-        anomaly_threshold=config["automata"]["anomaly_threshold"]
+        anomaly_threshold=config["automata"]["anomaly_threshold"],
     )
 
     y_aligned = align_labels_to_automata_predictions(
         y_test=y_test,
-        num_predictions=len(preds)
+        num_predictions=len(preds),
     )
 
     min_len = min(len(y_aligned), len(preds))
@@ -163,21 +150,79 @@ def evaluate_automata(
         "num_states": len(automata.vocabulary),
         "num_transitions": sum(len(v) for v in automata.transition_counts.values()),
         "sample_explanations": [
-            json.loads(
-                explainer.to_json(explanation)
-            )
+            json.loads(explainer.to_json(explanation))
             for explanation in automata.last_explanations[:5]
-        ]
+        ],
     }
+
+
+def run_automata_grid_for_dataset(X_train_pc1, X_test_pc1, y_test, config):
+    results = {}
+
+    for window_size in config["automata"]["window_sizes"]:
+        for alphabet_size in config["automata"]["alphabet_sizes"]:
+            experiment_name = f"w{window_size}_a{alphabet_size}"
+
+            clean = evaluate_automata(
+                X_train_pc1=X_train_pc1,
+                X_test_pc1=X_test_pc1,
+                y_test=y_test,
+                config=config,
+                window_size=window_size,
+                alphabet_size=alphabet_size,
+                apply_noise=False,
+            )
+
+            noisy = evaluate_automata(
+                X_train_pc1=X_train_pc1,
+                X_test_pc1=X_test_pc1,
+                y_test=y_test,
+                config=config,
+                window_size=window_size,
+                alphabet_size=alphabet_size,
+                apply_noise=True,
+            )
+
+            results[experiment_name] = {
+                "clean": clean,
+                "noisy": noisy,
+            }
+
+            print(
+                f"     Automata {experiment_name} "
+                f"Clean F1: {clean['f1']:.4f} | "
+                f"Noisy F1: {noisy['f1']:.4f}"
+            )
+
+    return results
+
+
+def summarize_skab_automata_grid(fold_metrics):
+    summary = {}
+
+    for experiment_name, experiment_data in fold_metrics.items():
+        summary[experiment_name] = {
+            "clean": {},
+            "noisy": {},
+        }
+
+        for condition in ["clean", "noisy"]:
+            summary[experiment_name][condition] = {
+                "f1": float(np.mean(experiment_data[condition]["f1"])),
+                "precision": float(np.mean(experiment_data[condition]["precision"])),
+                "recall": float(np.mean(experiment_data[condition]["recall"])),
+                "accuracy": float(np.mean(experiment_data[condition]["accuracy"])),
+                "f1_std": float(np.std(experiment_data[condition]["f1"])),
+            }
+
+    return summary
 
 
 def main():
     config = load_config()
     os.makedirs(config["output_dir"], exist_ok=True)
 
-    window_size = 5
-    automata_window_size = 5
-    automata_alphabet_size = 4
+    dl_window_size = 5
     batch_size = config["deep_learning"]["batch_size"]
 
     print("Loading datasets...")
@@ -185,7 +230,7 @@ def main():
 
     results_log = {
         "BATADAL": {},
-        "SKAB": {}
+        "SKAB": {},
     }
 
     for seed in config["random_seeds"]:
@@ -193,23 +238,33 @@ def main():
         set_seed(seed)
 
         # ==========================
-        # BATADAL EXPERIMENT
+        # BATADAL
         # ==========================
         print("Training on BATADAL...")
 
         train_dataset = TimeSeriesDataset(
             batadal_data["X_train"],
             batadal_data["y_train"],
-            window_size
+            dl_window_size,
         )
+
         test_dataset = TimeSeriesDataset(
             batadal_data["X_test"],
             batadal_data["y_test"],
-            window_size
+            dl_window_size,
         )
 
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+        )
+
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+        )
 
         input_size = batadal_data["X_train"].shape[1]
 
@@ -217,13 +272,13 @@ def main():
             "LSTM": LSTMAnomalyDetector(
                 input_size,
                 config["deep_learning"]["hidden_units"],
-                config["deep_learning"]["dropout_rate"]
+                config["deep_learning"]["dropout_rate"],
             ),
             "1D-CNN": CNN1DAnomalyDetector(
                 input_size,
                 config["deep_learning"]["hidden_units"],
-                config["deep_learning"]["dropout_rate"]
-            )
+                config["deep_learning"]["dropout_rate"],
+            ),
         }
 
         results_log["BATADAL"][seed] = {}
@@ -234,88 +289,65 @@ def main():
             trained_model = train_model(model, train_loader, config)
             needs_plots = seed == 42
 
-            metrics_clean = evaluate_model(
+            clean_metrics = evaluate_model(
                 trained_model,
                 test_loader,
-                return_arrays=needs_plots
+                return_arrays=needs_plots,
             )
 
             if needs_plots:
                 print(f"     -> Generating plots for BATADAL {model_name}...")
 
                 plot_confusion_matrix(
-                    metrics_clean["targets"],
-                    metrics_clean["preds"],
+                    clean_metrics["targets"],
+                    clean_metrics["preds"],
                     f"BATADAL {model_name} Confusion Matrix",
-                    os.path.join(config["output_dir"], f"BATADAL_{model_name}_CM.png")
+                    os.path.join(config["output_dir"], f"BATADAL_{model_name}_CM.png"),
                 )
 
                 plot_roc_curve(
-                    metrics_clean["targets"],
-                    metrics_clean["probs"],
+                    clean_metrics["targets"],
+                    clean_metrics["probs"],
                     f"BATADAL {model_name} ROC Curve",
-                    os.path.join(config["output_dir"], f"BATADAL_{model_name}_ROC.png")
+                    os.path.join(config["output_dir"], f"BATADAL_{model_name}_ROC.png"),
                 )
 
-            metrics_noisy = evaluate_model(
+            noisy_metrics = evaluate_model(
                 trained_model,
                 test_loader,
                 apply_noise=True,
-                config=config
+                config=config,
             )
 
             results_log["BATADAL"][seed][model_name] = {
                 "clean": {
-                    "f1": metrics_clean["f1"],
-                    "precision": metrics_clean["precision"],
-                    "recall": metrics_clean["recall"]
+                    "f1": clean_metrics["f1"],
+                    "precision": clean_metrics["precision"],
+                    "recall": clean_metrics["recall"],
                 },
                 "noisy": {
-                    "f1": metrics_noisy["f1"],
-                    "precision": metrics_noisy["precision"],
-                    "recall": metrics_noisy["recall"]
-                }
+                    "f1": noisy_metrics["f1"],
+                    "precision": noisy_metrics["precision"],
+                    "recall": noisy_metrics["recall"],
+                },
             }
 
             print(
-                f"     {model_name} Clean F1: {metrics_clean['f1']:.4f} | "
-                f"Noisy F1: {metrics_noisy['f1']:.4f}"
+                f"     {model_name} Clean F1: {clean_metrics['f1']:.4f} | "
+                f"Noisy F1: {noisy_metrics['f1']:.4f}"
             )
 
-        print("  -> Training Automata on BATADAL...")
+        print("  -> Training Automata grid on BATADAL...")
 
-        automata_clean = evaluate_automata(
+        results_log["BATADAL"][seed]["Automata"] = run_automata_grid_for_dataset(
             X_train_pc1=batadal_data["X_train_pc1"],
             X_test_pc1=batadal_data["X_test_pc1"],
             y_test=batadal_data["y_test"],
             config=config,
-            window_size=automata_window_size,
-            alphabet_size=automata_alphabet_size,
-            apply_noise=False
-        )
-
-        automata_noisy = evaluate_automata(
-            X_train_pc1=batadal_data["X_train_pc1"],
-            X_test_pc1=batadal_data["X_test_pc1"],
-            y_test=batadal_data["y_test"],
-            config=config,
-            window_size=automata_window_size,
-            alphabet_size=automata_alphabet_size,
-            apply_noise=True
-        )
-
-        results_log["BATADAL"][seed]["Automata"] = {
-            "clean": automata_clean,
-            "noisy": automata_noisy
-        }
-
-        print(
-            f"     Automata Clean F1: {automata_clean['f1']:.4f} | "
-            f"Noisy F1: {automata_noisy['f1']:.4f}"
         )
 
         # ==========================
-        # SKAB EXPERIMENT
+        # SKAB
         # ==========================
         print("Training on SKAB (GroupKFold)...")
 
@@ -325,16 +357,13 @@ def main():
         fold_metrics = {
             "LSTM": {
                 "clean": {"f1": [], "precision": [], "recall": []},
-                "noisy": {"f1": [], "precision": [], "recall": []}
+                "noisy": {"f1": [], "precision": [], "recall": []},
             },
             "1D-CNN": {
                 "clean": {"f1": [], "precision": [], "recall": []},
-                "noisy": {"f1": [], "precision": [], "recall": []}
+                "noisy": {"f1": [], "precision": [], "recall": []},
             },
-            "Automata": {
-                "clean": {"f1": [], "precision": [], "recall": [], "accuracy": []},
-                "noisy": {"f1": [], "precision": [], "recall": [], "accuracy": []}
-            }
+            "Automata": {},
         }
 
         for fold_idx, fold_data in enumerate(skab_splits):
@@ -343,23 +372,25 @@ def main():
             train_dataset_skab = TimeSeriesDataset(
                 fold_data["X_train"],
                 fold_data["y_train"],
-                window_size
+                dl_window_size,
             )
+
             test_dataset_skab = TimeSeriesDataset(
                 fold_data["X_test"],
                 fold_data["y_test"],
-                window_size
+                dl_window_size,
             )
 
             train_loader_skab = DataLoader(
                 train_dataset_skab,
                 batch_size=batch_size,
-                shuffle=True
+                shuffle=True,
             )
+
             test_loader_skab = DataLoader(
                 test_dataset_skab,
                 batch_size=batch_size,
-                shuffle=False
+                shuffle=False,
             )
 
             input_size_skab = fold_data["X_train"].shape[1]
@@ -368,13 +399,13 @@ def main():
                 "LSTM": LSTMAnomalyDetector(
                     input_size_skab,
                     config["deep_learning"]["hidden_units"],
-                    config["deep_learning"]["dropout_rate"]
+                    config["deep_learning"]["dropout_rate"],
                 ),
                 "1D-CNN": CNN1DAnomalyDetector(
                     input_size_skab,
                     config["deep_learning"]["hidden_units"],
-                    config["deep_learning"]["dropout_rate"]
-                )
+                    config["deep_learning"]["dropout_rate"],
+                ),
             }
 
             for model_name, model in models_skab.items():
@@ -382,85 +413,96 @@ def main():
 
                 needs_plots = seed == 42 and fold_idx == 0
 
-                metrics_clean = evaluate_model(
+                clean_metrics = evaluate_model(
                     trained_model,
                     test_loader_skab,
-                    return_arrays=needs_plots
+                    return_arrays=needs_plots,
                 )
 
                 if needs_plots:
                     print(f"     -> Generating plots for SKAB {model_name}...")
 
                     plot_confusion_matrix(
-                        metrics_clean["targets"],
-                        metrics_clean["preds"],
+                        clean_metrics["targets"],
+                        clean_metrics["preds"],
                         f"SKAB {model_name} Confusion Matrix",
-                        os.path.join(config["output_dir"], f"SKAB_{model_name}_CM.png")
+                        os.path.join(config["output_dir"], f"SKAB_{model_name}_CM.png"),
                     )
 
                     plot_roc_curve(
-                        metrics_clean["targets"],
-                        metrics_clean["probs"],
+                        clean_metrics["targets"],
+                        clean_metrics["probs"],
                         f"SKAB {model_name} ROC Curve",
-                        os.path.join(config["output_dir"], f"SKAB_{model_name}_ROC.png")
+                        os.path.join(config["output_dir"], f"SKAB_{model_name}_ROC.png"),
                     )
 
-                fold_metrics[model_name]["clean"]["f1"].append(metrics_clean["f1"])
-                fold_metrics[model_name]["clean"]["precision"].append(metrics_clean["precision"])
-                fold_metrics[model_name]["clean"]["recall"].append(metrics_clean["recall"])
+                fold_metrics[model_name]["clean"]["f1"].append(clean_metrics["f1"])
+                fold_metrics[model_name]["clean"]["precision"].append(clean_metrics["precision"])
+                fold_metrics[model_name]["clean"]["recall"].append(clean_metrics["recall"])
 
-                metrics_noisy = evaluate_model(
+                noisy_metrics = evaluate_model(
                     trained_model,
                     test_loader_skab,
                     apply_noise=True,
-                    config=config
+                    config=config,
                 )
 
-                fold_metrics[model_name]["noisy"]["f1"].append(metrics_noisy["f1"])
-                fold_metrics[model_name]["noisy"]["precision"].append(metrics_noisy["precision"])
-                fold_metrics[model_name]["noisy"]["recall"].append(metrics_noisy["recall"])
+                fold_metrics[model_name]["noisy"]["f1"].append(noisy_metrics["f1"])
+                fold_metrics[model_name]["noisy"]["precision"].append(noisy_metrics["precision"])
+                fold_metrics[model_name]["noisy"]["recall"].append(noisy_metrics["recall"])
 
-            print("     -> Training Automata on this SKAB fold...")
+            print("     -> Training Automata grid on this SKAB fold...")
 
-            skab_automata_clean = evaluate_automata(
-                X_train_pc1=fold_data["X_train_pc1"],
-                X_test_pc1=fold_data["X_test_pc1"],
-                y_test=fold_data["y_test"],
-                config=config,
-                window_size=automata_window_size,
-                alphabet_size=automata_alphabet_size,
-                apply_noise=False
-            )
+            for window_size in config["automata"]["window_sizes"]:
+                for alphabet_size in config["automata"]["alphabet_sizes"]:
+                    experiment_name = f"w{window_size}_a{alphabet_size}"
 
-            skab_automata_noisy = evaluate_automata(
-                X_train_pc1=fold_data["X_train_pc1"],
-                X_test_pc1=fold_data["X_test_pc1"],
-                y_test=fold_data["y_test"],
-                config=config,
-                window_size=automata_window_size,
-                alphabet_size=automata_alphabet_size,
-                apply_noise=True
-            )
+                    if experiment_name not in fold_metrics["Automata"]:
+                        fold_metrics["Automata"][experiment_name] = {
+                            "clean": {"f1": [], "precision": [], "recall": [], "accuracy": []},
+                            "noisy": {"f1": [], "precision": [], "recall": [], "accuracy": []},
+                        }
 
-            for metric_name in ["f1", "precision", "recall", "accuracy"]:
-                fold_metrics["Automata"]["clean"][metric_name].append(
-                    skab_automata_clean[metric_name]
-                )
-                fold_metrics["Automata"]["noisy"][metric_name].append(
-                    skab_automata_noisy[metric_name]
-                )
+                    clean_automata = evaluate_automata(
+                        X_train_pc1=fold_data["X_train_pc1"],
+                        X_test_pc1=fold_data["X_test_pc1"],
+                        y_test=fold_data["y_test"],
+                        config=config,
+                        window_size=window_size,
+                        alphabet_size=alphabet_size,
+                        apply_noise=False,
+                    )
 
-            print(
-                f"        Automata Clean Fold F1: {skab_automata_clean['f1']:.4f} | "
-                f"Noisy Fold F1: {skab_automata_noisy['f1']:.4f}"
-            )
+                    noisy_automata = evaluate_automata(
+                        X_train_pc1=fold_data["X_train_pc1"],
+                        X_test_pc1=fold_data["X_test_pc1"],
+                        y_test=fold_data["y_test"],
+                        config=config,
+                        window_size=window_size,
+                        alphabet_size=alphabet_size,
+                        apply_noise=True,
+                    )
+
+                    for metric_name in ["f1", "precision", "recall", "accuracy"]:
+                        fold_metrics["Automata"][experiment_name]["clean"][metric_name].append(
+                            clean_automata[metric_name]
+                        )
+                        fold_metrics["Automata"][experiment_name]["noisy"][metric_name].append(
+                            noisy_automata[metric_name]
+                        )
+
+                    print(
+                        f"        Automata {experiment_name} "
+                        f"Clean Fold F1: {clean_automata['f1']:.4f} | "
+                        f"Noisy Fold F1: {noisy_automata['f1']:.4f}"
+                    )
 
         results_log["SKAB"][seed] = {}
 
         for model_name in ["LSTM", "1D-CNN"]:
             results_log["SKAB"][seed][model_name] = {
                 "clean": {},
-                "noisy": {}
+                "noisy": {},
             }
 
             for condition in ["clean", "noisy"]:
@@ -468,7 +510,7 @@ def main():
                     "f1": float(np.mean(fold_metrics[model_name][condition]["f1"])),
                     "precision": float(np.mean(fold_metrics[model_name][condition]["precision"])),
                     "recall": float(np.mean(fold_metrics[model_name][condition]["recall"])),
-                    "f1_std": float(np.std(fold_metrics[model_name][condition]["f1"]))
+                    "f1_std": float(np.std(fold_metrics[model_name][condition]["f1"])),
                 }
 
             print(
@@ -478,26 +520,16 @@ def main():
                 f"{results_log['SKAB'][seed][model_name]['noisy']['f1']:.4f}"
             )
 
-        results_log["SKAB"][seed]["Automata"] = {
-            "clean": {},
-            "noisy": {}
-        }
-
-        for condition in ["clean", "noisy"]:
-            results_log["SKAB"][seed]["Automata"][condition] = {
-                "f1": float(np.mean(fold_metrics["Automata"][condition]["f1"])),
-                "precision": float(np.mean(fold_metrics["Automata"][condition]["precision"])),
-                "recall": float(np.mean(fold_metrics["Automata"][condition]["recall"])),
-                "accuracy": float(np.mean(fold_metrics["Automata"][condition]["accuracy"])),
-                "f1_std": float(np.std(fold_metrics["Automata"][condition]["f1"]))
-            }
-
-        print(
-            f"     SKAB Automata Clean F1: "
-            f"{results_log['SKAB'][seed]['Automata']['clean']['f1']:.4f} | "
-            f"Noisy F1: "
-            f"{results_log['SKAB'][seed]['Automata']['noisy']['f1']:.4f}"
+        results_log["SKAB"][seed]["Automata"] = summarize_skab_automata_grid(
+            fold_metrics["Automata"]
         )
+
+        for experiment_name, experiment_data in results_log["SKAB"][seed]["Automata"].items():
+            print(
+                f"     SKAB Automata {experiment_name} Clean F1: "
+                f"{experiment_data['clean']['f1']:.4f} | "
+                f"Noisy F1: {experiment_data['noisy']['f1']:.4f}"
+            )
 
     results_path = os.path.join(config["output_dir"], "dl_results.json")
 
