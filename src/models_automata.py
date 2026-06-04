@@ -181,25 +181,26 @@ class ProbabilisticAutomata:
         """Public helper for tests and explainability code."""
         return self._symbols_to_patterns(self._series_to_symbols(X))
 
-    def _series_to_symbols(self, X):
+    def _series_to_symbols(self, X, fit_transformer=False):
         series = self._as_1d_series(X)
         if len(series) < self.window_size:
             raise ValueError("Time series length must be at least window_size")
 
         ts = series.reshape(1, -1, 1)
 
-        # PAA is kept explicit for rubric compliance and future inspection.
-        # SAX internally performs segment aggregation as well; here both are
-        # configured with the current series length to keep one symbol per step.
-        self.paa_transformer = PAA(n_segments=len(series))
-        _ = self.paa_transformer.fit_transform(ts)
+        if fit_transformer or self.sax_transformer is None:
+            self.paa_transformer = PAA(n_segments=len(series))
+            _ = self.paa_transformer.fit_transform(ts)
 
-        self.sax_transformer = SAX(
-            n_segments=len(series),
-            alphabet_size_avg=self.alphabet_size,
-            scale=False,
-        )
-        sax_values = self.sax_transformer.fit_transform(ts).reshape(-1)
+            self.sax_transformer = SAX(
+                n_segments=len(series),
+                alphabet_size_avg=self.alphabet_size,
+                scale=False,
+            )
+            sax_values = self.sax_transformer.fit_transform(ts).reshape(-1)
+        else:
+            sax_values = self.sax_transformer.transform(ts).reshape(-1)
+
         return "".join(self._symbol_to_char(value) for value in sax_values)
 
     def _symbols_to_patterns(self, symbols):
