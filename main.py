@@ -1,5 +1,5 @@
-import os
 import json
+import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 from src.data_pipeline import load_config, load_skab, prepare_skab_cv, load_and_prepare_batadal
 from src.models_dl import TimeSeriesDataset, LSTMAnomalyDetector, CNN1DAnomalyDetector
 from src.models_automata import ProbabilisticAutomata
+from src.explainer import AutomataExplainer
 from src.visualizations import plot_confusion_matrix, plot_roc_curve, plot_pr_curve
 
 
@@ -129,6 +130,10 @@ def evaluate_automata(
 
     automata.fit(X_train_pc1)
 
+    explainer = AutomataExplainer(
+        config["automata"]["anomaly_threshold"]
+    )
+
     preds = automata.predict(
         X_test_pc1,
         anomaly_threshold=config["automata"]["anomaly_threshold"]
@@ -150,7 +155,12 @@ def evaluate_automata(
         "recall": recall_score(y_aligned, preds, zero_division=0),
         "num_states": len(automata.vocabulary),
         "num_transitions": sum(len(v) for v in automata.transition_counts.values()),
-        "sample_explanations": automata.last_explanations[:5]
+        "sample_explanations": [
+            json.loads(
+                explainer.to_json(explanation)
+            )
+            for explanation in automata.last_explanations[:5]
+        ]
     }
 
 
