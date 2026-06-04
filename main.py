@@ -116,7 +116,7 @@ def evaluate_automata(
         anomaly_threshold=config["automata"]["anomaly_threshold"]
     )
 
-    y_aligned = y_test[window_size - 1:]
+    y_aligned = y_test[-len(preds):]
 
     min_len = min(len(y_aligned), len(preds))
     y_aligned = y_aligned[:min_len]
