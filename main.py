@@ -17,8 +17,7 @@ from src.data_pipeline import (
 from src.explainer import AutomataExplainer
 from src.models_automata import ProbabilisticAutomata
 from src.models_dl import CNN1DAnomalyDetector, LSTMAnomalyDetector, TimeSeriesDataset
-from src.visualizations import plot_confusion_matrix, plot_roc_curve
-
+from src.visualizations import plot_confusion_matrix, plot_roc_curve, plot_pr_curve
 
 def set_seed(seed):
     torch.manual_seed(seed)
@@ -311,6 +310,12 @@ def main():
                     f"BATADAL {model_name} ROC Curve",
                     os.path.join(config["output_dir"], f"BATADAL_{model_name}_ROC.png"),
                 )
+                plot_pr_curve(
+                    clean_metrics["targets"],
+                    clean_metrics["probs"],
+                    f"BATADAL {model_name} Precision-Recall Curve",
+                    os.path.join(config["output_dir"], f"BATADAL_{model_name}_PR.png"),
+                )
 
             noisy_metrics = evaluate_model(
                 trained_model,
@@ -434,6 +439,13 @@ def main():
                         clean_metrics["probs"],
                         f"SKAB {model_name} ROC Curve",
                         os.path.join(config["output_dir"], f"SKAB_{model_name}_ROC.png"),
+                    )
+
+                    plot_pr_curve(
+                        clean_metrics["targets"],
+                        clean_metrics["probs"],
+                        f"SKAB {model_name} Precision-Recall Curve",
+                        os.path.join(config["output_dir"], f"SKAB_{model_name}_PR.png"),
                     )
 
                 fold_metrics[model_name]["clean"]["f1"].append(clean_metrics["f1"])
