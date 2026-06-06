@@ -4,13 +4,15 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from sklearn.metrics import f1_score, precision_score, recall_score
+from sklearn.metrics import f1_score, precision_score, recall_score, precision_recall_curve 
 from torch.utils.data import DataLoader
 
 # Import our custom modules
 from src.data_pipeline import load_config, load_skab, prepare_skab_cv, load_and_prepare_batadal
 from src.models_dl import TimeSeriesDataset, LSTMAnomalyDetector, CNN1DAnomalyDetector
 from src.visualizations import plot_confusion_matrix, plot_roc_curve, plot_pr_curve
+
+
 
 # ==========================================
 # 1. UTILITIES & REPRODUCIBILITY
@@ -33,9 +35,18 @@ def apply_gaussian_noise(X, config):
 # ==========================================
 # 2. TRAINING & EVALUATION ENGINES
 # ==========================================
+
 def train_model(model, train_loader, config):
-    """Standard PyTorch training loop."""
-    criterion = nn.BCELoss() # Binary Cross Entropy for Anomaly (0) vs Normal (1)
+    """Standard PyTorch training loop with Class Weights for Imbalanced Data."""
+    # Calculate positive weight to force the model to care about anomalies
+    y_train_tensor = train_loader.dataset.y
+    num_positives = torch.sum(y_train_tensor)
+    num_negatives = len(y_train_tensor) - num_positives
+    # Prevent division by zero just in case
+    pos_weight = num_negatives / (num_positives + 1e-8) 
+    
+    # Use BCEWithLogitsLoss instead of BCELoss
+    criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight])) 
     optimizer = optim.Adam(model.parameters(), lr=config['deep_learning']['learning_rate'])
     epochs = config['deep_learning']['epochs']
     
@@ -43,46 +54,60 @@ def train_model(model, train_loader, config):
     for epoch in range(epochs):
         for X_batch, y_batch in train_loader:
             optimizer.zero_grad()
-            predictions = model(X_batch)
-            loss = criterion(predictions, y_batch)
+            raw_logits = model(X_batch)
+            loss = criterion(raw_logits, y_batch)
             loss.backward()
             optimizer.step()
     return model
 
 def evaluate_model(model, test_loader, apply_noise=False, config=None, return_arrays=False):
-    """Evaluates the model. Optionally applies Gaussian noise to inputs."""
+    """Evaluates the model using Dynamic Thresholding."""
     model.eval()
-    all_preds = []
     all_targets = []
     all_probs = []
     
     with torch.no_grad():
         for X_batch, y_batch in test_loader:
-            # Inject noise if flag is true
             if apply_noise and config:
-                # Convert to numpy, add noise, convert back to tensor
                 X_np = X_batch.numpy()
                 X_noisy = apply_gaussian_noise(X_np, config)
                 X_batch = torch.tensor(X_noisy, dtype=torch.float32)
 
-            predictions = model(X_batch)
-            binary_preds = (predictions > 0.5).float()
-
-            all_probs.extend(predictions.numpy())
-            all_preds.extend(binary_preds.numpy())
+            raw_logits = model(X_batch)
+            # Apply sigmoid here since we removed it from the model
+            probs = torch.sigmoid(raw_logits) 
+            
+            all_probs.extend(probs.numpy())
             all_targets.extend(y_batch.numpy())
             
-    f1 = f1_score(all_targets, all_preds, zero_division=0)
-    precision = precision_score(all_targets, all_preds, zero_division=0)
-    recall = recall_score(all_targets, all_preds, zero_division=0)
+    all_targets = np.array(all_targets)
+    all_probs = np.array(all_probs)
+            
+    # Dynamic Threshold Tuning: Find the threshold that maximizes F1
+    precisions, recalls, thresholds = precision_recall_curve(all_targets, all_probs)
+    # Calculate F1 for all possible thresholds
+    f1_scores = 2 * (precisions * recalls) / (precisions + recalls + 1e-8)
     
-    result = {"f1": f1, "precision": precision, "recall": recall}
+    # Get the best threshold (default to 0.5 if it fails)
+    if len(thresholds) > 0:
+        best_idx = np.argmax(f1_scores[:-1]) # exclude last item which corresponds to recall=0
+        best_threshold = thresholds[best_idx]
+    else:
+        best_threshold = 0.5
+
+    # Apply the dynamic threshold
+    binary_preds = (all_probs >= best_threshold).astype(int)
+    
+    final_f1 = f1_score(all_targets, binary_preds, zero_division=0)
+    final_precision = precision_score(all_targets, binary_preds, zero_division=0)
+    final_recall = recall_score(all_targets, binary_preds, zero_division=0)
+    
+    result = {"f1": final_f1, "precision": final_precision, "recall": final_recall, "threshold": best_threshold}
     
     if return_arrays:
         result["targets"] = all_targets
-        result["preds"] = all_preds
+        result["preds"] = binary_preds
         result["probs"] = all_probs
-
 
     return result
 

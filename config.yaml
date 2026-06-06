@@ -9,7 +9,7 @@ output_dir: "./results"
 
 # 2. Dataset Paths & Splitting Rules
 data:
-  apply_pca: true # Toggle PCA for cross-dataset compatibility
+  apply_pca: false # Toggle PCA for cross-dataset compatibility
   pca_components: # Squash all features into 1 unified component
 
   skab:
@@ -33,7 +33,7 @@ automata:
 # 4. Deep Learning Hyperparameters
 deep_learning:
   models_to_train: ["LSTM", "1D-CNN"] # Options: LSTM, GRU, 1D-CNN
-  epochs: 1
+  epochs: 50
   batch_size: 32
   learning_rate: 0.001
   early_stopping_patience: 5
