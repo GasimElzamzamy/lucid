@@ -17,7 +17,7 @@ from src.data_pipeline import (
 from src.explainer import AutomataExplainer
 from src.models_automata import ProbabilisticAutomata
 from src.models_dl import CNN1DAnomalyDetector, LSTMAnomalyDetector, TimeSeriesDataset
-from src.visualizations import plot_confusion_matrix, plot_roc_curve
+from src.visualizations import plot_confusion_matrix, plot_roc_curve, plot_pr_curve
 
 
 def set_seed(seed):
@@ -35,22 +35,100 @@ def apply_gaussian_noise(X, config):
     return X
 
 
-def train_model(model, train_loader, config):
-    criterion = nn.BCELoss()
+def _calculate_positive_weight(dataset):
+    y = dataset.y[dataset.window_size - 1:]
+    positives = torch.sum(y == 1).item()
+    negatives = torch.sum(y == 0).item()
+
+    if positives == 0:
+        return 1.0
+
+    return max(1.0, negatives / positives)
+
+
+def _evaluate_validation_loss(model, val_loader, criterion, positive_weight):
+    model.eval()
+    losses = []
+
+    with torch.no_grad():
+        for X_batch, y_batch in val_loader:
+            predictions = model(X_batch)
+            loss_values = criterion(predictions, y_batch)
+
+            sample_weights = torch.where(
+                y_batch == 1,
+                torch.tensor(positive_weight, dtype=torch.float32),
+                torch.tensor(1.0, dtype=torch.float32),
+            )
+
+            loss = (loss_values * sample_weights).mean()
+            losses.append(loss.item())
+
+    model.train()
+    return float(np.mean(losses)) if losses else float("inf")
+
+
+def train_model(model, train_loader, config, val_loader=None):
+    """
+    Trains a deep learning model with class-weighted BCE loss.
+    This prevents imbalanced datasets such as BATADAL from collapsing
+    into always predicting the normal class.
+    """
+    criterion = nn.BCELoss(reduction="none")
     optimizer = optim.Adam(
         model.parameters(),
         lr=config["deep_learning"]["learning_rate"],
     )
+
+    positive_weight = _calculate_positive_weight(train_loader.dataset)
+
+    best_val_loss = float("inf")
+    best_state = None
+    patience_counter = 0
+    patience = config["deep_learning"].get("early_stopping_patience", 5)
 
     model.train()
 
     for _ in range(config["deep_learning"]["epochs"]):
         for X_batch, y_batch in train_loader:
             optimizer.zero_grad()
+
             predictions = model(X_batch)
-            loss = criterion(predictions, y_batch)
+            loss_values = criterion(predictions, y_batch)
+
+            sample_weights = torch.where(
+                y_batch == 1,
+                torch.tensor(positive_weight, dtype=torch.float32),
+                torch.tensor(1.0, dtype=torch.float32),
+            )
+
+            loss = (loss_values * sample_weights).mean()
             loss.backward()
             optimizer.step()
+
+        if val_loader is not None:
+            val_loss = _evaluate_validation_loss(
+                model=model,
+                val_loader=val_loader,
+                criterion=criterion,
+                positive_weight=positive_weight,
+            )
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_state = {
+                    key: value.detach().clone()
+                    for key, value in model.state_dict().items()
+                }
+                patience_counter = 0
+            else:
+                patience_counter += 1
+
+            if patience_counter >= patience:
+                break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
 
     return model
 
@@ -77,6 +155,7 @@ def evaluate_model(model, test_loader, apply_noise=False, config=None, return_ar
             all_targets.extend(np.atleast_1d(y_batch.detach().cpu().numpy()).reshape(-1))
 
     result = {
+        "accuracy": accuracy_score(all_targets, all_preds),
         "f1": f1_score(all_targets, all_preds, zero_division=0),
         "precision": precision_score(all_targets, all_preds, zero_division=0),
         "recall": recall_score(all_targets, all_preds, zero_division=0),
@@ -237,14 +316,17 @@ def main():
         print(f"\n--- Running Experiment for Seed: {seed} ---")
         set_seed(seed)
 
-        # ==========================
-        # BATADAL
-        # ==========================
         print("Training on BATADAL...")
 
         train_dataset = TimeSeriesDataset(
             batadal_data["X_train"],
             batadal_data["y_train"],
+            dl_window_size,
+        )
+
+        val_dataset = TimeSeriesDataset(
+            batadal_data["X_val"],
+            batadal_data["y_val"],
             dl_window_size,
         )
 
@@ -258,6 +340,12 @@ def main():
             train_dataset,
             batch_size=batch_size,
             shuffle=True,
+        )
+
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
         )
 
         test_loader = DataLoader(
@@ -286,7 +374,13 @@ def main():
         for model_name, model in models.items():
             print(f"  -> Training {model_name}...")
 
-            trained_model = train_model(model, train_loader, config)
+            trained_model = train_model(
+                model,
+                train_loader,
+                config,
+                val_loader=val_loader,
+            )
+
             needs_plots = seed == 42
 
             clean_metrics = evaluate_model(
@@ -312,6 +406,13 @@ def main():
                     os.path.join(config["output_dir"], f"BATADAL_{model_name}_ROC.png"),
                 )
 
+                plot_pr_curve(
+                    clean_metrics["targets"],
+                    clean_metrics["probs"],
+                    f"BATADAL {model_name} Precision-Recall Curve",
+                    os.path.join(config["output_dir"], f"BATADAL_{model_name}_PR.png"),
+                )
+
             noisy_metrics = evaluate_model(
                 trained_model,
                 test_loader,
@@ -321,11 +422,13 @@ def main():
 
             results_log["BATADAL"][seed][model_name] = {
                 "clean": {
+                    "accuracy": clean_metrics["accuracy"],
                     "f1": clean_metrics["f1"],
                     "precision": clean_metrics["precision"],
                     "recall": clean_metrics["recall"],
                 },
                 "noisy": {
+                    "accuracy": noisy_metrics["accuracy"],
                     "f1": noisy_metrics["f1"],
                     "precision": noisy_metrics["precision"],
                     "recall": noisy_metrics["recall"],
@@ -346,9 +449,6 @@ def main():
             config=config,
         )
 
-        # ==========================
-        # SKAB
-        # ==========================
         print("Training on SKAB (GroupKFold)...")
 
         skab_df = load_skab(config)
@@ -356,12 +456,12 @@ def main():
 
         fold_metrics = {
             "LSTM": {
-                "clean": {"f1": [], "precision": [], "recall": []},
-                "noisy": {"f1": [], "precision": [], "recall": []},
+                "clean": {"f1": [], "precision": [], "recall": [], "accuracy": []},
+                "noisy": {"f1": [], "precision": [], "recall": [], "accuracy": []},
             },
             "1D-CNN": {
-                "clean": {"f1": [], "precision": [], "recall": []},
-                "noisy": {"f1": [], "precision": [], "recall": []},
+                "clean": {"f1": [], "precision": [], "recall": [], "accuracy": []},
+                "noisy": {"f1": [], "precision": [], "recall": [], "accuracy": []},
             },
             "Automata": {},
         }
@@ -409,7 +509,11 @@ def main():
             }
 
             for model_name, model in models_skab.items():
-                trained_model = train_model(model, train_loader_skab, config)
+                trained_model = train_model(
+                    model,
+                    train_loader_skab,
+                    config,
+                )
 
                 needs_plots = seed == 42 and fold_idx == 0
 
@@ -436,9 +540,12 @@ def main():
                         os.path.join(config["output_dir"], f"SKAB_{model_name}_ROC.png"),
                     )
 
-                fold_metrics[model_name]["clean"]["f1"].append(clean_metrics["f1"])
-                fold_metrics[model_name]["clean"]["precision"].append(clean_metrics["precision"])
-                fold_metrics[model_name]["clean"]["recall"].append(clean_metrics["recall"])
+                    plot_pr_curve(
+                        clean_metrics["targets"],
+                        clean_metrics["probs"],
+                        f"SKAB {model_name} Precision-Recall Curve",
+                        os.path.join(config["output_dir"], f"SKAB_{model_name}_PR.png"),
+                    )
 
                 noisy_metrics = evaluate_model(
                     trained_model,
@@ -447,9 +554,13 @@ def main():
                     config=config,
                 )
 
-                fold_metrics[model_name]["noisy"]["f1"].append(noisy_metrics["f1"])
-                fold_metrics[model_name]["noisy"]["precision"].append(noisy_metrics["precision"])
-                fold_metrics[model_name]["noisy"]["recall"].append(noisy_metrics["recall"])
+                for metric_name in ["f1", "precision", "recall", "accuracy"]:
+                    fold_metrics[model_name]["clean"][metric_name].append(
+                        clean_metrics[metric_name]
+                    )
+                    fold_metrics[model_name]["noisy"][metric_name].append(
+                        noisy_metrics[metric_name]
+                    )
 
             print("     -> Training Automata grid on this SKAB fold...")
 
@@ -507,6 +618,7 @@ def main():
 
             for condition in ["clean", "noisy"]:
                 results_log["SKAB"][seed][model_name][condition] = {
+                    "accuracy": float(np.mean(fold_metrics[model_name][condition]["accuracy"])),
                     "f1": float(np.mean(fold_metrics[model_name][condition]["f1"])),
                     "precision": float(np.mean(fold_metrics[model_name][condition]["precision"])),
                     "recall": float(np.mean(fold_metrics[model_name][condition]["recall"])),
@@ -533,8 +645,8 @@ def main():
 
     results_path = os.path.join(config["output_dir"], "dl_results.json")
 
-    with open(results_path, "w") as f:
-        json.dump(results_log, f, indent=4)
+    with open(results_path, "w", encoding="utf-8") as file:
+        json.dump(results_log, file, indent=4)
 
     print(f"\n✅ All runs complete! Results saved to {results_path}")
 
