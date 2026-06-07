@@ -79,7 +79,7 @@ def _add_pc1_features(X_train_scaled, X_test_scaled, X_val_scaled=None):
 
 
 def prepare_skab_cv(df, config):
-    """Yields scaled and PCA-transformed Train/Test splits using GroupKFold."""
+    """Yields scaled Train/Test splits using GroupKFold, and generates 1D PC1 for Automata."""
     n_splits = config["data"]["skab"]["n_splits_cv"]
     gkf = GroupKFold(n_splits=n_splits)
 
@@ -97,13 +97,12 @@ def prepare_skab_cv(df, config):
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
         
-        # 2. PCA Compression (If enabled in config)
-        if config['data'].get('apply_pca', False):
-            pca = PCA(n_components=config['data']['pca_components'])
-            # Fit PCA ONLY on training data
-            X_train_scaled = pca.fit_transform(X_train_scaled)
-            X_test_scaled = pca.transform(X_test_scaled)
-        
+        # Generates the required 1D data for the Automata
+        X_train_pc1, X_test_pc1 = _add_pc1_features(
+            X_train_scaled,
+            X_test_scaled
+        )
+
         splits.append({
             "X_train": X_train_scaled,
             "y_train": y_train,
@@ -117,7 +116,7 @@ def prepare_skab_cv(df, config):
 
 
 def load_and_prepare_batadal(config):
-    """Loads BATADAL, cleans labels, and performs chronological 60/20/20 split."""
+    """Loads BATADAL, scales it for DL, and generates 1D PC1 for Automata."""
     batadal_config = config["data"]["batadal"]
     file_path = os.path.join(
         batadal_config["dir_path"],
@@ -152,13 +151,13 @@ def load_and_prepare_batadal(config):
     X_val_scaled = scaler.transform(X_val)
     X_test_scaled = scaler.transform(X_test)
     
-    # PCA Compression (If enabled in config)
-    if config['data'].get('apply_pca', False):
-        pca = PCA(n_components=config['data']['pca_components'])
-        X_train_scaled = pca.fit_transform(X_train_scaled)
-        X_val_scaled = pca.transform(X_val_scaled)
-        X_test_scaled = pca.transform(X_test_scaled)
-    
+    # Generates the required 1D data for the Automata
+    X_train_pc1, X_val_pc1, X_test_pc1 = _add_pc1_features(
+        X_train_scaled,
+        X_test_scaled,
+        X_val_scaled
+    )
+
     return {
         "X_train": X_train_scaled,
         "y_train": y_train,
