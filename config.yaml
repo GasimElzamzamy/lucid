@@ -14,7 +14,7 @@ data:
 
   skab:
     dir_path: "./data/SKAB"
-    target_folders: ["valve1", "valve2", "other"] # Pipeline will loop through these
+    target_folders: ["valve1", "valve2"] # Pipeline will loop through these
     n_splits_cv: 5
 
   batadal:
@@ -29,6 +29,7 @@ automata:
   alphabet_sizes: [3, 4, 5, 6]
   # For transition probabilities that are zero (smoothing)
   laplace_smoothing: 1e-5
+  anomaly_threshold: 0.01
 
 # 4. Deep Learning Hyperparameters
 deep_learning:

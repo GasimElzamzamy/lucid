@@ -2,14 +2,11 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
 
-# ==========================================
-# 1. TIME-SERIES SLIDING WINDOW DATASET
-# ==========================================
 class TimeSeriesDataset(Dataset):
     def __init__(self, X, y, window_size):
         self.X = torch.tensor(X, dtype=torch.float32)
         self.y = torch.tensor(y, dtype=torch.float32)
-        self.window_size = window_size
+        self.window_size = int(window_size)
 
     def __len__(self):
         return len(self.X) - self.window_size
@@ -17,9 +14,6 @@ class TimeSeriesDataset(Dataset):
     def __getitem__(self, idx):
         return self.X[idx : idx + self.window_size], self.y[idx + self.window_size - 1]
 
-# ==========================================
-# 2. LONG SHORT-TERM MEMORY (LSTM) MODEL
-# ==========================================
 class LSTMAnomalyDetector(nn.Module):
     def __init__(self, input_size, hidden_size, dropout_rate):
         super(LSTMAnomalyDetector, self).__init__()
@@ -34,9 +28,6 @@ class LSTMAnomalyDetector(nn.Module):
         out = self.fc(out)
         return out.squeeze()
 
-# ==========================================
-# 3. 1D CONVOLUTIONAL NEURAL NETWORK
-# ==========================================
 class CNN1DAnomalyDetector(nn.Module):
     def __init__(self, input_size, hidden_size, dropout_rate):
         super(CNN1DAnomalyDetector, self).__init__()
