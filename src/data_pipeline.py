@@ -96,12 +96,14 @@ def prepare_skab_cv(df, config):
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
-
-        X_train_pc1, X_test_pc1 = _add_pc1_features(
-            X_train_scaled,
-            X_test_scaled
-        )
-
+        
+        # 2. PCA Compression (If enabled in config)
+        if config['data'].get('apply_pca', False):
+            pca = PCA(n_components=config['data']['pca_components'])
+            # Fit PCA ONLY on training data
+            X_train_scaled = pca.fit_transform(X_train_scaled)
+            X_test_scaled = pca.transform(X_test_scaled)
+        
         splits.append({
             "X_train": X_train_scaled,
             "y_train": y_train,
@@ -149,13 +151,14 @@ def load_and_prepare_batadal(config):
     X_train_scaled = scaler.fit_transform(X_train)
     X_val_scaled = scaler.transform(X_val)
     X_test_scaled = scaler.transform(X_test)
-
-    X_train_pc1, X_val_pc1, X_test_pc1 = _add_pc1_features(
-        X_train_scaled,
-        X_test_scaled,
-        X_val_scaled
-    )
-
+    
+    # PCA Compression (If enabled in config)
+    if config['data'].get('apply_pca', False):
+        pca = PCA(n_components=config['data']['pca_components'])
+        X_train_scaled = pca.fit_transform(X_train_scaled)
+        X_val_scaled = pca.transform(X_val_scaled)
+        X_test_scaled = pca.transform(X_test_scaled)
+    
     return {
         "X_train": X_train_scaled,
         "y_train": y_train,
