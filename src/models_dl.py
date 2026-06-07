@@ -26,7 +26,7 @@ class LSTMAnomalyDetector(nn.Module):
         last_step_out = lstm_out[:, -1, :] 
         out = self.dropout(last_step_out)
         out = self.fc(out)
-        return out.squeeze()
+        return out.view(-1)
 
 class CNN1DAnomalyDetector(nn.Module):
     def __init__(self, input_size, hidden_size, dropout_rate):
@@ -43,4 +43,4 @@ class CNN1DAnomalyDetector(nn.Module):
         x, _ = torch.max(x, dim=2) 
         x = self.dropout(x)
         out = self.fc(x)
-        return out.squeeze()
+        return out.view(-1)
