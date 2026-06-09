@@ -133,7 +133,14 @@ def train_model(model, train_loader, config, val_loader=None):
     return model
 
 
-def evaluate_model(model, test_loader, apply_noise=False, config=None, return_arrays=False):
+def evaluate_model(
+    model,
+    test_loader,
+    apply_noise=False,
+    config=None,
+    return_arrays=False,
+    threshold=0.5,
+):
     model.eval()
 
     all_preds = []
@@ -148,7 +155,7 @@ def evaluate_model(model, test_loader, apply_noise=False, config=None, return_ar
                 X_batch = torch.tensor(X_noisy, dtype=torch.float32)
 
             predictions = model(X_batch)
-            binary_preds = (predictions > 0.5).float()
+            binary_preds = (predictions > threshold).float()
 
             all_probs.extend(np.atleast_1d(predictions.detach().cpu().numpy()).reshape(-1))
             all_preds.extend(np.atleast_1d(binary_preds.detach().cpu().numpy()).reshape(-1))
@@ -167,6 +174,36 @@ def evaluate_model(model, test_loader, apply_noise=False, config=None, return_ar
         result["probs"] = all_probs
 
     return result
+
+def find_best_threshold(model, val_loader):
+    """
+    Selects the best probability threshold on the validation set using F1 score.
+    This is especially important for imbalanced anomaly detection datasets.
+    """
+    model.eval()
+
+    all_probs = []
+    all_targets = []
+
+    with torch.no_grad():
+        for X_batch, y_batch in val_loader:
+            predictions = model(X_batch)
+
+            all_probs.extend(np.atleast_1d(predictions.detach().cpu().numpy()).reshape(-1))
+            all_targets.extend(np.atleast_1d(y_batch.detach().cpu().numpy()).reshape(-1))
+
+    best_threshold = 0.5
+    best_f1 = -1.0
+
+    for threshold in np.linspace(0.05, 0.95, 91):
+        preds = (np.asarray(all_probs) > threshold).astype(int)
+        score = f1_score(all_targets, preds, zero_division=0)
+
+        if score > best_f1:
+            best_f1 = score
+            best_threshold = float(threshold)
+
+    return best_threshold
 
 
 def align_labels_to_automata_predictions(y_test, num_predictions):
@@ -382,11 +419,18 @@ def main():
             )
 
             needs_plots = seed == 42
+            best_threshold = find_best_threshold(
+                trained_model,
+                val_loader,
+            )
+
+            print(f"     Selected threshold for {model_name}: {best_threshold:.2f}")
 
             clean_metrics = evaluate_model(
                 trained_model,
                 test_loader,
                 return_arrays=needs_plots,
+                threshold=best_threshold,
             )
 
             if needs_plots:
@@ -418,9 +462,11 @@ def main():
                 test_loader,
                 apply_noise=True,
                 config=config,
+                threshold=best_threshold,
             )
 
             results_log["BATADAL"][seed][model_name] = {
+                "selected_threshold": best_threshold,
                 "clean": {
                     "accuracy": clean_metrics["accuracy"],
                     "f1": clean_metrics["f1"],

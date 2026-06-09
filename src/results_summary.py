@@ -24,6 +24,9 @@ def flatten_results(results):
                 if model_name == "Automata":
                     for experiment_name, experiment_results in model_results.items():
                         for condition, metrics in experiment_results.items():
+                            if not isinstance(metrics, dict):
+                                continue
+
                             rows.append({
                                 "dataset": dataset_name,
                                 "seed": seed,
@@ -38,8 +41,15 @@ def flatten_results(results):
                                 "num_states": metrics.get("num_states"),
                                 "num_transitions": metrics.get("num_transitions"),
                             })
+
                 else:
                     for condition, metrics in model_results.items():
+                        if condition not in ["clean", "noisy"]:
+                            continue
+
+                        if not isinstance(metrics, dict):
+                            continue
+
                         rows.append({
                             "dataset": dataset_name,
                             "seed": seed,
